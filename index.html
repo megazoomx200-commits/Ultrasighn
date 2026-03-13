@@ -215,7 +215,28 @@ Scanner-ul analizează automat perechile selectate și trimite semnalele pe Tele
 <div><div class="toggle-label">Activează Auto-Scanner</div><div class="toggle-sub" id="scanStatus">Dezactivat</div></div>
 <div class="toggle-sw" id="scanSw" onclick="toggleScanner()"><div class="knob"></div></div>
 </div>
-<div class="card-title" style="margin-top:8px">Perechi de scanat</div>
+
+<div class="card-title" style="margin-top:12px">📊 Mod Semnale</div>
+<div style="display:flex;flex-direction:column;gap:8px">
+<div style="padding:10px 14px;border:1px solid var(--border);border-radius:10px;cursor:pointer;transition:all .2s" id="modeTP" onclick="setScanMode('tp')">
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:var(--green)">📈 TP/SL Clasic</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text3)">Fiecare semnal vine cu Entry, TP și SL. Trimite doar la scorul minim.</div>
+</div>
+<div style="padding:10px 14px;border:1px solid var(--border);border-radius:10px;cursor:pointer;transition:all .2s" id="modeDIR" onclick="setScanMode('dir')">
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:var(--cyan)">🔄 Schimbare Direcție</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text3)">Notificare când direcția se schimbă: SUS→JOS sau JOS→SUS. Fără prag minim.</div>
+</div>
+</div>
+
+<div class="card-title" style="margin-top:14px">🎚️ Prag minim alertă: <span id="thresholdVal" style="color:var(--btc)">40</span>%</div>
+<div style="display:flex;align-items:center;gap:10px">
+<span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text3)">10</span>
+<input type="range" min="10" max="80" value="40" id="thresholdSlider" oninput="updateThreshold(this.value)" style="flex:1;accent-color:var(--btc);height:6px">
+<span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text3)">80</span>
+</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text3);margin-top:4px">Scăzut = mai multe semnale (risc mai mare) · Ridicat = mai puține (mai precise)</div>
+
+<div class="card-title" style="margin-top:14px">Perechi de scanat</div>
 <div class="chip-row" id="scanPairsChips"></div>
 <div class="card-title" style="margin-top:14px">Timeframe grafic</div>
 <div class="chip-row" id="scanTfChips"></div>
@@ -284,6 +305,9 @@ let scanEnabled=false,scanInterval=null,scanFreq=900;
 let scanPairs=PAIRS.map(p=>p.short);
 let scanTF=15;
 let audioCtx=null;
+let scanMode=localStorage.getItem('scan_mode')||'tp'; // 'tp' or 'dir'
+let minThreshold=parseInt(localStorage.getItem('min_threshold'))||40;
+let lastDirPerPair={}; // track last direction per pair for direction-change mode
 
 // ===== INIT =====
 function checkPw(){if(document.getElementById('pinField').value===PIN){document.getElementById('pinScreen').classList.add('hidden');document.getElementById('mainApp').classList.add('visible');init();}else{document.getElementById('pinError').textContent='Parolă incorectă';document.getElementById('pinField').value='';setTimeout(()=>document.getElementById('pinError').innerHTML='&nbsp;',1500);}}
@@ -292,7 +316,8 @@ function init(){
 buildPairBtns();buildTfBtns();buildSettings();
 document.getElementById('pairLabel').textContent=cur.name;
 document.getElementById('priceSrc').textContent=cur.src==='binance'?'Binance':'Twelve Data';
-connectPrice();updateTgUI();
+connectPrice();updateTgUI();updateScanModeUI();updateThreshold(minThreshold);
+document.getElementById('thresholdSlider').value=minThreshold;
 }
 
 // ===== TABS =====
@@ -322,6 +347,17 @@ TFS.forEach(t=>{const c=document.createElement('div');c.className='chip'+(t.v===
 const sf=document.getElementById('scanFreqChips');sf.innerHTML='';
 FREQS.forEach(f=>{const c=document.createElement('div');c.className='chip'+(f.v===scanFreq?' active-btc':'');c.textContent=f.l;c.onclick=()=>{scanFreq=f.v;sf.querySelectorAll('.chip').forEach(x=>x.classList.remove('active-btc'));c.classList.add('active-btc');if(scanEnabled){clearInterval(scanInterval);scanInterval=setInterval(runAutoScan,scanFreq*1000);}};sf.appendChild(c);});
 }
+
+// ===== SCAN MODE & THRESHOLD =====
+function setScanMode(mode){scanMode=mode;localStorage.setItem('scan_mode',mode);updateScanModeUI();showToast(mode==='tp'?'Mod: TP/SL Clasic':'Mod: Schimbare Direcție');}
+function updateScanModeUI(){
+const tp=document.getElementById('modeTP'),dir=document.getElementById('modeDIR');
+tp.style.borderColor=scanMode==='tp'?'var(--green)':'var(--border)';
+tp.style.background=scanMode==='tp'?'var(--green-dim)':'transparent';
+dir.style.borderColor=scanMode==='dir'?'var(--cyan)':'var(--border)';
+dir.style.background=scanMode==='dir'?'var(--cyan-dim)':'transparent';
+}
+function updateThreshold(val){minThreshold=parseInt(val);localStorage.setItem('min_threshold',minThreshold);document.getElementById('thresholdVal').textContent=minThreshold;}
 
 // ===== TELEGRAM =====
 function saveTgToken(){tgToken=document.getElementById('tgToken').value.trim();localStorage.setItem('tg_token',tgToken);updateTgUI();showToast('Token salvat');}
@@ -371,32 +407,55 @@ const data=await fetchKlines(pair,scanTF);
 if(!data||data.length<52)continue;
 const result=scoreTF(data);
 const absScore=Math.abs(result.s);
-const hasSignal=absScore>=40; // STRICT: minim 40
+const curDir=result.s>0?'SUS':'JOS';
 const dir=result.s>0?'long':'short';
 const dec=pair.dec;
 const lastPrice=data[data.length-1].c;
-// Calculate SL/TP for this pair
 const at2=_AT(data);
 const opt=optSLTP(data,dir,at2);
 const validSLTP=opt.valid&&opt.tpP>opt.slP&&opt.tpP>=40&&opt.slP<=50;
 const strong=absScore>=60;
-// Backtest this pair
 const btR=bt(data);
-// Confidence = weighted score
 const confidence=Math.min(95,Math.round(absScore*.6+(validSLTP?15:0)+(btR.wr>60?10:0)));
-// Add to history with SL/TP
-const entry={pair:pair.short,dir:result.s>0?'SUS':'JOS',conf:confidence,time:new Date().toLocaleTimeString('ro'),hasSignal:hasSignal&&validSLTP,score:result.s,sl:validSLTP?opt.sl:0,tp:validSLTP?opt.tp:0,tpP:opt.tpP,slP:opt.slP,price:lastPrice,bt:btR.wr,dec};
+// History entry
+const entry={pair:pair.short,dir:curDir,conf:confidence,time:new Date().toLocaleTimeString('ro'),hasSignal:absScore>=minThreshold&&validSLTP,score:result.s,sl:validSLTP?opt.sl:0,tp:validSLTP?opt.tp:0,tpP:opt.tpP,slP:opt.slP,price:lastPrice,bt:btR.wr,dec};
 history.unshift(entry);if(history.length>50)history.pop();
 stats.total++;stats.wrSum+=btR.wr;if(result.s>15)stats.up++;else if(result.s<-15)stats.dn++;else stats.neut++;
-// Send Telegram ONLY if strong signal + valid SL/TP
-if(hasSignal&&validSLTP&&tgAuto&&tgToken&&tgChatId){
+
+if(!tgAuto||!tgToken||!tgChatId)continue;
+
+// === MODE: TP/SL CLASIC ===
+if(scanMode==='tp'){
+const hasSignal=absScore>=minThreshold&&validSLTP;
+if(hasSignal){
 const emoji=result.s>0?'🟢':'🔴';
 const dirTxt=result.s>0?'SUS ▲':'JOS ▼';
 const risk=Math.abs(lastPrice-opt.sl),reward=Math.abs(opt.tp-lastPrice);
 const rr=risk>0?(reward/risk).toFixed(1):'—';
-const msg=`${emoji} <b>${pair.name} ${dirTxt}</b>${strong?' 🔥 PUTERNIC':''}\n\n💰 Entry: <code>${lastPrice.toFixed(dec)}</code>\n🔴 SL: <code>${opt.sl.toFixed(dec)}</code> (hit ${opt.slP}%)\n🟢 TP: <code>${opt.tp.toFixed(dec)}</code> (hit ${opt.tpP}%)\n📊 R:R: <b>1:${rr}</b>\n\n📈 Scor: ${result.s} | Încredere: ${confidence}%\n🎯 Backtest: ${btR.wr}% (${btR.n} trades)\n⚙️ Regim: ${result.reg}\n${result.rs.slice(0,4).join(' · ')}\n\n⚠️ EDUCATIV — nu este sfat financiar`;
+const msg=`${emoji} <b>${pair.name} ${dirTxt}</b>${strong?' 🔥 PUTERNIC':''}\n\n💰 Entry: <code>${lastPrice.toFixed(dec)}</code>\n🔴 SL: <code>${opt.sl.toFixed(dec)}</code> (hit ${opt.slP}%)\n🟢 TP: <code>${opt.tp.toFixed(dec)}</code> (hit ${opt.tpP}%)\n📊 R:R: <b>1:${rr}</b>\n\n📈 Scor: ${result.s} | Încredere: ${confidence}%\n🎯 Backtest: ${btR.wr}% (${btR.n} trades)\n⚙️ ${result.reg} | ${result.rs.slice(0,4).join(' · ')}`;
 try{await sendTelegram(msg);}catch(e){}
 }
+}
+// === MODE: SCHIMBARE DIRECȚIE ===
+else if(scanMode==='dir'){
+const prevDir=lastDirPerPair[pair.short];
+if(prevDir&&prevDir!==curDir){
+// Direction changed! Send regardless of score
+const emoji=curDir==='SUS'?'🟢':'🔴';
+const arrow=curDir==='SUS'?'JOS → SUS 🔄':'SUS → JOS 🔄';
+let msg=`${emoji} <b>${pair.name}</b>\n🔄 <b>${arrow}</b>\n\n💰 Preț: <code>${lastPrice.toFixed(dec)}</code>\n📈 Scor: ${result.s} | ${result.reg}`;
+// Add SL/TP if available
+if(validSLTP){
+const risk=Math.abs(lastPrice-opt.sl),reward=Math.abs(opt.tp-lastPrice);
+const rr=risk>0?(reward/risk).toFixed(1):'—';
+msg+=`\n\n🔴 SL: <code>${opt.sl.toFixed(dec)}</code>\n🟢 TP: <code>${opt.tp.toFixed(dec)}</code>\n📊 R:R: 1:${rr}`;
+}
+msg+=`\n\n${result.rs.slice(0,4).join(' · ')}`;
+try{await sendTelegram(msg);}catch(e){}
+}
+lastDirPerPair[pair.short]=curDir;
+}
+
 }catch(e){console.warn('Scan error:',pair.short,e);}
 await new Promise(r=>setTimeout(r,800));
 }
