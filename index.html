@@ -370,23 +370,35 @@ try{
 const data=await fetchKlines(pair,scanTF);
 if(!data||data.length<52)continue;
 const result=scoreTF(data);
+const absScore=Math.abs(result.s);
+const hasSignal=absScore>=40; // STRICT: minim 40
 const dir=result.s>0?'long':'short';
-const strong=Math.abs(result.s)>=50;
-const hasSignal=Math.abs(result.s)>=25;
-// Add to history
-const entry={pair:pair.short,dir:result.s>0?'SUS':'JOS',conf:Math.min(95,Math.abs(result.s)),time:new Date().toLocaleTimeString('ro'),hasSignal,score:result.s};
+const dec=pair.dec;
+const lastPrice=data[data.length-1].c;
+// Calculate SL/TP for this pair
+const at2=_AT(data);
+const opt=optSLTP(data,dir,at2);
+const validSLTP=opt.valid&&opt.tpP>opt.slP&&opt.tpP>=40&&opt.slP<=50;
+const strong=absScore>=60;
+// Backtest this pair
+const btR=bt(data);
+// Confidence = weighted score
+const confidence=Math.min(95,Math.round(absScore*.6+(validSLTP?15:0)+(btR.wr>60?10:0)));
+// Add to history with SL/TP
+const entry={pair:pair.short,dir:result.s>0?'SUS':'JOS',conf:confidence,time:new Date().toLocaleTimeString('ro'),hasSignal:hasSignal&&validSLTP,score:result.s,sl:validSLTP?opt.sl:0,tp:validSLTP?opt.tp:0,tpP:opt.tpP,slP:opt.slP,price:lastPrice,bt:btR.wr,dec};
 history.unshift(entry);if(history.length>50)history.pop();
-stats.total++;if(result.s>15)stats.up++;else if(result.s<-15)stats.dn++;else stats.neut++;
-// Send Telegram if signal
-if(hasSignal&&tgAuto&&tgToken&&tgChatId){
+stats.total++;stats.wrSum+=btR.wr;if(result.s>15)stats.up++;else if(result.s<-15)stats.dn++;else stats.neut++;
+// Send Telegram ONLY if strong signal + valid SL/TP
+if(hasSignal&&validSLTP&&tgAuto&&tgToken&&tgChatId){
 const emoji=result.s>0?'🟢':'🔴';
 const dirTxt=result.s>0?'SUS ▲':'JOS ▼';
-const msg=`${emoji} <b>${pair.name} ${dirTxt}</b>\nScor: ${result.s} | Încredere: ${Math.min(95,Math.abs(result.s))}%\nRegim: ${result.reg}\n${result.rs.slice(0,4).join(' · ')}`;
+const risk=Math.abs(lastPrice-opt.sl),reward=Math.abs(opt.tp-lastPrice);
+const rr=risk>0?(reward/risk).toFixed(1):'—';
+const msg=`${emoji} <b>${pair.name} ${dirTxt}</b>${strong?' 🔥 PUTERNIC':''}\n\n💰 Entry: <code>${lastPrice.toFixed(dec)}</code>\n🔴 SL: <code>${opt.sl.toFixed(dec)}</code> (hit ${opt.slP}%)\n🟢 TP: <code>${opt.tp.toFixed(dec)}</code> (hit ${opt.tpP}%)\n📊 R:R: <b>1:${rr}</b>\n\n📈 Scor: ${result.s} | Încredere: ${confidence}%\n🎯 Backtest: ${btR.wr}% (${btR.n} trades)\n⚙️ Regim: ${result.reg}\n${result.rs.slice(0,4).join(' · ')}\n\n⚠️ EDUCATIV — nu este sfat financiar`;
 try{await sendTelegram(msg);}catch(e){}
 }
 }catch(e){console.warn('Scan error:',pair.short,e);}
-// Small delay between pairs to avoid rate limits
-await new Promise(r=>setTimeout(r,500));
+await new Promise(r=>setTimeout(r,800));
 }
 }
 
@@ -535,7 +547,12 @@ return{hasSignal,dir:DIR,score:result.s,conf:confidence,strong:Math.abs(result.s
 function renderHistory(){
 const list=document.getElementById('historyList');
 if(!history.length){list.innerHTML='<div class="empty-hist">Niciun semnal încă.</div>';return;}
-list.innerHTML=history.slice(0,30).map(h=>`<div class="sig-item"><span class="sig-pair">${h.pair}</span><span class="sig-dir ${h.score>0?'up':'dn'}">${h.dir}</span><div class="sig-info"><div class="sig-conf">${h.conf}%</div><div class="sig-time">${h.time}</div></div></div>`).join('');
+list.innerHTML=history.slice(0,30).map(h=>{
+const hasSLTP=h.sl&&h.tp&&h.hasSignal;
+const dec=h.dec||2;
+const extra=hasSLTP?`<div style="font-size:8px;color:var(--text3);margin-top:2px">SL:${h.sl.toFixed(dec)} TP:${h.tp.toFixed(dec)} BT:${h.bt||'—'}%</div>`:'';
+return `<div class="sig-item"><span class="sig-pair">${h.pair}</span><span class="sig-dir ${h.score>0?'up':'dn'}">${h.hasSignal?'':'⏳ '}${h.dir}</span><div class="sig-info"><div class="sig-conf">${h.conf}%</div><div class="sig-time">${h.time}</div>${extra}</div></div>`;
+}).join('');
 }
 
 // ===== ACCURACY =====
